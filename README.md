@@ -24,10 +24,36 @@ The first implementation phase is **OBSERVE only**.
 Initial observer contract:
 
 ```text
-0 = service exists, is running, and is healthy
-1 = service exists and is unhealthy
-2 = health cannot be evaluated
+0 = observed and healthy
+1 = observed and unhealthy or unavailable
+2 = observation could not produce a definitive health judgment
 ```
+
+The distinction is intentional:
+
+- exit `0` means observation completed and the service satisfies its health contract;
+- exit `1` means observation completed and the service does not satisfy its health contract;
+- exit `2` means the observer could not reliably determine whether the service satisfies its health contract.
+
+For the first Docker-backed NGINX adapter, examples include:
+
+```text
+container exists + running + healthy      -> 0
+
+container exists + running + unhealthy    -> 1
+container exists + stopped                -> 1
+expected container absent                 -> 1
+
+Docker unavailable                        -> 2
+permission denied                         -> 2
+required healthcheck absent               -> 2
+Docker health = starting                  -> 2
+unexpected or malformed provider state    -> 2
+```
+
+A stopped or absent expected service is an availability failure, not an observation failure, when the observer can determine that state conclusively.
+
+A transitional health state such as Docker `starting` is not classified as unhealthy because Docker has not yet produced a definitive health judgment.
 
 No automatic restart or other remediation is included in the initial phase.
 
