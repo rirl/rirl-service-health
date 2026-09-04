@@ -17,11 +17,7 @@ OBSERVE -> RECOVER -> VERIFY
 
 Certificate correctness remains a separate concern. For TLS consumers, `RECONCILE` belongs to the certificate lifecycle and must not be conflated with service-health recovery.
 
-## Current phase
-
-The first implementation phase is **OBSERVE only**.
-
-Initial observer contract:
+## OBSERVE contract
 
 ```text
 0 = observed and healthy
@@ -55,7 +51,39 @@ A stopped or absent expected service is an availability failure, not an observat
 
 A transitional health state such as Docker `starting` is not classified as unhealthy because Docker has not yet produced a definitive health judgment.
 
-No automatic restart or other remediation is included in the initial phase.
+## RECOVER contract
+
+RECOVER is service-specific and policy-controlled.
+
+Its purpose is to perform an allowed corrective action after a definitive unhealthy or unavailable observation. RECOVER does not determine service health and does not prove that recovery restored health.
+
+Initial exit contract:
+
+```text
+0 = recovery action completed successfully; VERIFY must run next
+1 = recovery action was attempted but failed
+2 = recovery could not be attempted safely or definitively
+```
+
+The initial policy boundary is:
+
+```text
+OBSERVE decides state.
+RECOVER performs an allowed corrective action.
+VERIFY proves the resulting service state.
+```
+
+RECOVER must never report a service as healthy merely because the recovery command itself succeeded.
+
+For the first NGINX adapter, the likely recovery action is a controlled restart of the expected Docker container. Automatic execution remains deferred until the recovery policy and adapter behavior are implemented and validated.
+
+RECOVER should only act when policy permits it. In particular, recovery must not be inferred from a transient or indeterminate observation such as Docker health `starting` or an inability to reach Docker.
+
+## VERIFY contract
+
+VERIFY is a future capability.
+
+Its responsibility is to prove that a recovery operation restored the service's required health state. VERIFY must use the service's actual health contract rather than assuming success from the recovery command.
 
 ## Layout
 

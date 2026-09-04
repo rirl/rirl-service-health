@@ -62,13 +62,56 @@ Docker `starting` is treated as not yet definitively evaluable rather than unhea
 
 ### RECOVER
 
-Future capability. Service-specific and policy-controlled. Recovery must not be inferred from a single transient health failure unless policy explicitly permits it.
+RECOVER is a service-specific, policy-controlled action.
 
-Examples may include controlled restart, but some services may require different handling. A Vault implementation, for example, may need to distinguish sealed, standby, active, and unavailable states before selecting a recovery action.
+It is invoked only when policy permits a corrective action after a definitive unhealthy or unavailable observation. RECOVER does not classify service health and does not prove that the resulting service state is healthy.
+
+Initial exit contract:
+
+```text
+0 = recovery action completed successfully; VERIFY must run next
+1 = recovery action was attempted but failed
+2 = recovery could not be attempted safely or definitively
+```
+
+The semantic boundary is:
+
+```text
+OBSERVE decides state.
+RECOVER performs an allowed corrective action.
+VERIFY proves the resulting service state.
+```
+
+A successful recovery command is not proof of service recovery. For example, a successful `docker restart` means only that Docker accepted and completed the restart operation; it does not prove that the service subsequently became healthy.
+
+RECOVER must therefore never collapse action and verification into one result.
+
+#### Recovery policy
+
+The first recovery policy should remain conservative:
+
+- act only on a definitive unhealthy or unavailable condition;
+- do not act when observation is indeterminate;
+- do not infer recovery permission from Docker health `starting`;
+- do not act when Docker itself is unavailable or health cannot be evaluated;
+- preserve explicit operator intent where the adapter can distinguish it;
+- leave service-specific safety rules inside the adapter.
+
+For NGINX, the first likely recovery action is a controlled restart of the expected Docker container.
+
+This does not imply that restart is the generic recovery action. A future Vault adapter may need to distinguish sealed, standby, active, and unavailable states and may deliberately refuse automated recovery for some conditions.
+
+Automatic RECOVER execution is intentionally deferred until the adapter contract, safety policy, tests, and live validation are in place.
 
 ### VERIFY
 
-Future capability. Proves that a recovery operation restored the required service state. Verification must use the service's actual health contract rather than assuming an action succeeded because a command returned success.
+VERIFY is a future capability.
+
+It proves that a recovery operation restored the required service state.
+
+VERIFY must use the service's actual health contract rather than treating recovery-command success as sufficient evidence.
+
+For a Docker-backed NGINX adapter, VERIFY will likely require observing that the expected container is running and that Docker health has reached `healthy` after recovery. Exact timeout and retry policy should be defined when VERIFY is implemented rather than inferred prematurely.
 
 ## NGINX as the first adapter
 
@@ -79,22 +122,29 @@ The existing nginx validation service already demonstrates:
 - Explicit operator stop is preserved.
 - Docker daemon restart and host reboot restore the container.
 
-The first nginx adapter should therefore observe Docker health state externally. Automatic remediation is intentionally deferred until observation behavior is implemented and validated.
+The first nginx adapter observes Docker health state externally.
 
-The first adapter must preserve the generic contract boundary:
+The first RECOVER implementation will likely perform a controlled restart when policy permits it, but recovery must remain separate from both OBSERVE and VERIFY.
+
+The adapter boundary remains:
 
 ```text
 generic framework
-    knows: service identity, adapter selection, OBSERVE exit semantics
+    knows: service identity, adapter selection, behavioral exit contracts
 
 nginx adapter
-    knows: Docker container identity, running state, Docker health state
+    knows: Docker container identity, running state, Docker health state,
+           and nginx-specific recovery mechanics
 ```
 
-The generic framework must not depend on nginx-specific health mechanics.
+The generic framework must not depend on nginx-specific health or restart behavior.
 
 ## Future services
 
-A later HashiCorp Vault adapter may implement the same behavioral interface with different service-specific semantics. The framework should not assume that restart is always an appropriate recovery action.
+A later HashiCorp Vault adapter may implement the same behavioral interface with different service-specific semantics.
 
-A future Vault observer may need to distinguish states such as sealed, standby, active, and unavailable before mapping them into the generic OBSERVE contract. The generic contract should therefore remain intentionally small until a second real adapter demonstrates which additional distinctions are genuinely reusable.
+A future Vault observer may need to distinguish states such as sealed, standby, active, and unavailable before mapping them into the generic OBSERVE contract.
+
+Likewise, a future Vault RECOVER implementation may refuse automated action for some states or require a completely different corrective operation.
+
+The generic contract should therefore remain intentionally small until a second real adapter demonstrates which additional distinctions are genuinely reusable.
