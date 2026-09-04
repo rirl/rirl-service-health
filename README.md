@@ -65,7 +65,7 @@ Initial exit contract:
 2 = recovery could not be attempted safely or definitively
 ```
 
-The initial policy boundary is:
+The policy boundary is:
 
 ```text
 OBSERVE decides state.
@@ -75,15 +75,46 @@ VERIFY proves the resulting service state.
 
 RECOVER must never report a service as healthy merely because the recovery command itself succeeded.
 
-For the first NGINX adapter, the likely recovery action is a controlled restart of the expected Docker container. Automatic execution remains deferred until the recovery policy and adapter behavior are implemented and validated.
-
-RECOVER should only act when policy permits it. In particular, recovery must not be inferred from a transient or indeterminate observation such as Docker health `starting` or an inability to reach Docker.
+For the first NGINX adapter, the likely recovery action is a controlled restart of the expected Docker container.
 
 ## VERIFY contract
 
-VERIFY is a future capability.
+VERIFY is read-only with respect to recovery actions. It does not restart, reload, or otherwise mutate the target service.
 
-Its responsibility is to prove that a recovery operation restored the service's required health state. VERIFY must use the service's actual health contract rather than assuming success from the recovery command.
+Its purpose is to prove that the service reached the required healthy state after recovery.
+
+Initial exit contract:
+
+```text
+0 = required service health was proven
+1 = service was observed but did not reach required health
+2 = verification could not be completed definitively
+```
+
+The first NGINX VERIFY implementation should:
+
+- poll the service's OBSERVE result;
+- succeed only when the expected container is running and Docker health is `healthy`;
+- tolerate transitional observation results such as Docker health `starting` while the verification window remains open;
+- return exit `1` when the verification timeout expires without proving health;
+- return exit `2` when verification cannot continue definitively because observation itself fails in a non-transitional way, such as Docker becoming unavailable;
+- never invoke RECOVER itself.
+
+VERIFY must distinguish between:
+
+```text
+not healthy yet
+```
+
+and:
+
+```text
+cannot determine health
+```
+
+A timeout is therefore a failed health proof, not an observation error.
+
+Timeout and polling interval are policy inputs to VERIFY and should have explicit defaults rather than depending on shell timing or Docker's internal healthcheck cadence implicitly.
 
 ## Layout
 

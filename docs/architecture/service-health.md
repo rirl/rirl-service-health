@@ -34,13 +34,13 @@ Initial exit contract:
 2 = observation could not produce a definitive health judgment
 ```
 
-The contract distinguishes **service failure** from **observation failure**.
+The contract distinguishes service failure from observation failure.
 
 Exit `0` means the observer successfully evaluated the service and the service satisfies its health contract.
 
-Exit `1` means the observer successfully evaluated the service and the service does not satisfy its health contract. For an expected service, a conclusively observed stopped or absent service is therefore unhealthy/unavailable rather than unevaluable.
+Exit `1` means the observer successfully evaluated the service and the service does not satisfy its health contract.
 
-Exit `2` means the observer could not reliably determine whether the service satisfies its health contract. Examples include provider unavailability, insufficient permissions, missing required health instrumentation, malformed provider state, or a transitional condition for which no definitive health judgment exists.
+Exit `2` means the observer could not reliably determine whether the service satisfies its health contract.
 
 For the first Docker-backed NGINX adapter:
 
@@ -58,7 +58,7 @@ Docker health = starting                  -> 2
 unexpected or malformed provider state    -> 2
 ```
 
-Docker `starting` is treated as not yet definitively evaluable rather than unhealthy. This preserves the semantic distinction between a service that has failed its health contract and a service for which the health system has not yet rendered a final judgment.
+Docker `starting` is treated as not yet definitively evaluable rather than unhealthy.
 
 ### RECOVER
 
@@ -82,36 +82,115 @@ RECOVER performs an allowed corrective action.
 VERIFY proves the resulting service state.
 ```
 
-A successful recovery command is not proof of service recovery. For example, a successful `docker restart` means only that Docker accepted and completed the restart operation; it does not prove that the service subsequently became healthy.
+A successful recovery command is not proof of service recovery.
 
-RECOVER must therefore never collapse action and verification into one result.
-
-#### Recovery policy
-
-The first recovery policy should remain conservative:
-
-- act only on a definitive unhealthy or unavailable condition;
-- do not act when observation is indeterminate;
-- do not infer recovery permission from Docker health `starting`;
-- do not act when Docker itself is unavailable or health cannot be evaluated;
-- preserve explicit operator intent where the adapter can distinguish it;
-- leave service-specific safety rules inside the adapter.
-
-For NGINX, the first likely recovery action is a controlled restart of the expected Docker container.
-
-This does not imply that restart is the generic recovery action. A future Vault adapter may need to distinguish sealed, standby, active, and unavailable states and may deliberately refuse automated recovery for some conditions.
-
-Automatic RECOVER execution is intentionally deferred until the adapter contract, safety policy, tests, and live validation are in place.
+For NGINX, the first recovery action is a controlled restart of the expected Docker container when policy permits it.
 
 ### VERIFY
 
-VERIFY is a future capability.
+VERIFY is a read-only proof operation over the post-recovery service state.
 
-It proves that a recovery operation restored the required service state.
+It does not restart, reload, reconcile, or perform any recovery action itself.
 
-VERIFY must use the service's actual health contract rather than treating recovery-command success as sufficient evidence.
+Initial exit contract:
 
-For a Docker-backed NGINX adapter, VERIFY will likely require observing that the expected container is running and that Docker health has reached `healthy` after recovery. Exact timeout and retry policy should be defined when VERIFY is implemented rather than inferred prematurely.
+```text
+0 = required service health was proven
+1 = service was observed but did not reach required health
+2 = verification could not be completed definitively
+```
+
+The first VERIFY implementation should repeatedly evaluate the service through the existing OBSERVE contract rather than duplicating nginx/Docker health interpretation.
+
+That gives VERIFY the following state machine:
+
+```text
+OBSERVE = 0
+    -> VERIFY succeeds immediately
+
+OBSERVE = 1
+    -> service is definitively unhealthy/unavailable
+    -> continue polling while verification time remains
+
+OBSERVE = 2
+    -> if the result is a known transitional state, continue polling
+    -> if observation cannot continue definitively, VERIFY exits 2
+
+verification deadline expires
+    -> VERIFY exits 1
+```
+
+This preserves the distinction between:
+
+```text
+health not yet proven
+```
+
+and:
+
+```text
+health cannot be evaluated
+```
+
+A timeout means the service never reached the required healthy state within the verification window. That is a failed health proof and therefore exit `1`, not exit `2`.
+
+#### Verification policy
+
+VERIFY should have explicit policy inputs:
+
+- total verification timeout;
+- polling interval.
+
+Defaults should be conservative and deterministic.
+
+The defaults should not be derived implicitly from Docker healthcheck timing, because future adapters may use entirely different health mechanisms.
+
+VERIFY should tolerate transitional states long enough for a recovery action to take effect, but it must not wait indefinitely.
+
+#### NGINX behavior
+
+For the first Docker-backed NGINX adapter, successful verification means:
+
+```text
+expected container exists
+container state = running
+Docker health = healthy
+```
+
+A stopped, absent, or persistently unhealthy container cannot satisfy VERIFY.
+
+Docker health `starting` is transitional and may be retried while the verification deadline remains open.
+
+If Docker itself becomes unavailable, permissions prevent inspection, required health instrumentation disappears, or provider state becomes malformed, verification cannot continue definitively and should exit `2`.
+
+VERIFY must not invoke RECOVER.
+
+### Composition
+
+The intended orchestration model is:
+
+```text
+OBSERVE
+    |
+    | healthy
+    +------------------------------> success
+    |
+    | unhealthy/unavailable
+    v
+RECOVER
+    |
+    | action completed
+    v
+VERIFY
+    |
+    +--> health proven              -> success
+    |
+    +--> deadline expired           -> failed recovery proof
+    |
+    +--> observation unavailable    -> indeterminate verification
+```
+
+The framework should preserve the contracts of the individual operations even when they are later composed by a higher-level supervisor.
 
 ## NGINX as the first adapter
 
@@ -122,15 +201,16 @@ The existing nginx validation service already demonstrates:
 - Explicit operator stop is preserved.
 - Docker daemon restart and host reboot restore the container.
 
-The first nginx adapter observes Docker health state externally.
+The nginx adapter now provides OBSERVE and RECOVER operations.
 
-The first RECOVER implementation will likely perform a controlled restart when policy permits it, but recovery must remain separate from both OBSERVE and VERIFY.
+The next adapter capability is VERIFY, implemented by polling the established observation contract until health is proven or the verification policy terminates the attempt.
 
 The adapter boundary remains:
 
 ```text
 generic framework
-    knows: service identity, adapter selection, behavioral exit contracts
+    knows: service identity, adapter selection, behavioral exit contracts,
+           verification timing policy
 
 nginx adapter
     knows: Docker container identity, running state, Docker health state,
@@ -143,8 +223,6 @@ The generic framework must not depend on nginx-specific health or restart behavi
 
 A later HashiCorp Vault adapter may implement the same behavioral interface with different service-specific semantics.
 
-A future Vault observer may need to distinguish states such as sealed, standby, active, and unavailable before mapping them into the generic OBSERVE contract.
+A Vault VERIFY implementation might need to prove an allowed state such as active or standby rather than simply mapping a Docker health value to healthy.
 
-Likewise, a future Vault RECOVER implementation may refuse automated action for some states or require a completely different corrective operation.
-
-The generic contract should therefore remain intentionally small until a second real adapter demonstrates which additional distinctions are genuinely reusable.
+The generic VERIFY contract should therefore remain focused on proof semantics and timing rather than hard-coding Docker or nginx concepts.
