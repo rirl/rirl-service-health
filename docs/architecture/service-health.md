@@ -6,8 +6,6 @@
 
 ## Separation of concerns
 
-Two orthogonal reliability concerns are deliberately kept separate:
-
 ```text
 Certificate correctness
     RECONCILE
@@ -16,17 +14,15 @@ Service availability
     OBSERVE -> RECOVER -> VERIFY
 ```
 
-`RECONCILE` answers whether a TLS consumer is serving the currently authoritative certificate and, when necessary, converges that state.
-
-The service-health interface answers whether a service is available and healthy, whether availability recovery should be attempted, and whether recovery succeeded.
-
 ## Behavioral contracts
 
 ### OBSERVE
 
-Read-only. It must not restart, reload, reconcile, or otherwise mutate the target service.
+OBSERVE is read-only.
 
-Initial exit contract:
+Its machine-readable contract consists of an exit code plus a stable reason token.
+
+Exit contract:
 
 ```text
 0 = observed and healthy
@@ -34,39 +30,47 @@ Initial exit contract:
 2 = observation could not produce a definitive health judgment
 ```
 
-The contract distinguishes **service failure** from **observation failure**.
+Reason tokens:
 
-Exit `0` means the observer successfully evaluated the service and the service satisfies its health contract.
+```text
+healthy
+unhealthy
+stopped
+absent
+starting
+docker-unavailable
+no-healthcheck
+malformed-state
+```
 
-Exit `1` means the observer successfully evaluated the service and the service does not satisfy its health contract. For an expected service, a conclusively observed stopped or absent service is therefore unhealthy/unavailable rather than unevaluable.
+The stable output form is:
 
-Exit `2` means the observer could not reliably determine whether the service satisfies its health contract. Examples include provider unavailability, insufficient permissions, missing required health instrumentation, malformed provider state, or a transitional condition for which no definitive health judgment exists.
+```text
+reason=<token>
+```
+
+Human-readable messages are not part of the machine interface.
 
 For the first Docker-backed NGINX adapter:
 
 ```text
-container exists + running + healthy      -> 0
-
-container exists + running + unhealthy    -> 1
-container exists + stopped                -> 1
-expected container absent                 -> 1
-
-Docker unavailable                        -> 2
-permission denied                         -> 2
-required healthcheck absent               -> 2
-Docker health = starting                  -> 2
-unexpected or malformed provider state    -> 2
+running + healthy       -> 0 / healthy
+running + unhealthy     -> 1 / unhealthy
+stopped                 -> 1 / stopped
+expected container absent
+                        -> 1 / absent
+Docker unavailable      -> 2 / docker-unavailable
+Docker health starting  -> 2 / starting
+no required healthcheck -> 2 / no-healthcheck
+unexpected provider state
+                        -> 2 / malformed-state
 ```
 
-Docker `starting` is treated as not yet definitively evaluable rather than unhealthy. This preserves the semantic distinction between a service that has failed its health contract and a service for which the health system has not yet rendered a final judgment.
+This refinement is required so higher-level orchestration can distinguish a transitional state such as `starting` from a hard observation failure such as `docker-unavailable`.
 
 ### RECOVER
 
-RECOVER is a service-specific, policy-controlled action.
-
-It is invoked only when policy permits a corrective action after a definitive unhealthy or unavailable observation. RECOVER does not classify service health and does not prove that the resulting service state is healthy.
-
-Initial exit contract:
+RECOVER remains action-only:
 
 ```text
 0 = recovery action completed successfully; VERIFY must run next
@@ -74,77 +78,73 @@ Initial exit contract:
 2 = recovery could not be attempted safely or definitively
 ```
 
-The semantic boundary is:
-
-```text
-OBSERVE decides state.
-RECOVER performs an allowed corrective action.
-VERIFY proves the resulting service state.
-```
-
-A successful recovery command is not proof of service recovery. For example, a successful `docker restart` means only that Docker accepted and completed the restart operation; it does not prove that the service subsequently became healthy.
-
-RECOVER must therefore never collapse action and verification into one result.
-
-#### Recovery policy
-
-The first recovery policy should remain conservative:
-
-- act only on a definitive unhealthy or unavailable condition;
-- do not act when observation is indeterminate;
-- do not infer recovery permission from Docker health `starting`;
-- do not act when Docker itself is unavailable or health cannot be evaluated;
-- preserve explicit operator intent where the adapter can distinguish it;
-- leave service-specific safety rules inside the adapter.
-
-For NGINX, the first likely recovery action is a controlled restart of the expected Docker container.
-
-This does not imply that restart is the generic recovery action. A future Vault adapter may need to distinguish sealed, standby, active, and unavailable states and may deliberately refuse automated recovery for some conditions.
-
-Automatic RECOVER execution is intentionally deferred until the adapter contract, safety policy, tests, and live validation are in place.
+RECOVER must not claim health.
 
 ### VERIFY
 
-VERIFY is a future capability.
+VERIFY is a read-only proof operation over post-recovery state.
 
-It proves that a recovery operation restored the required service state.
+Exit contract:
 
-VERIFY must use the service's actual health contract rather than treating recovery-command success as sufficient evidence.
+```text
+0 = required service health was proven
+1 = service was observed but did not reach required health
+2 = verification could not be completed definitively
+```
 
-For a Docker-backed NGINX adapter, VERIFY will likely require observing that the expected container is running and that Docker health has reached `healthy` after recovery. Exact timeout and retry policy should be defined when VERIFY is implemented rather than inferred prematurely.
+VERIFY must reuse OBSERVE's machine interface rather than duplicate adapter-specific health interpretation.
+
+State handling:
+
+```text
+OBSERVE exit 0 / reason=healthy
+    -> VERIFY 0
+
+OBSERVE exit 1
+    -> retry until deadline
+    -> deadline -> VERIFY 1
+
+OBSERVE exit 2 / reason=starting
+    -> retry until deadline
+
+OBSERVE exit 2 / reason in:
+    docker-unavailable
+    no-healthcheck
+    malformed-state
+    -> VERIFY 2
+```
+
+The human-readable OBSERVE message must never be parsed by VERIFY.
+
+### Composition
+
+```text
+OBSERVE
+    |
+    | healthy
+    +------------------------------> success
+    |
+    | unhealthy/unavailable
+    v
+RECOVER
+    |
+    | action completed
+    v
+VERIFY
+    |
+    +--> health proven              -> success
+    +--> deadline expired           -> failed recovery proof
+    +--> hard observation failure   -> indeterminate verification
+```
 
 ## NGINX as the first adapter
 
-The existing nginx validation service already demonstrates:
+The NGINX adapter owns Docker/container-specific interpretation.
 
-- Docker health can transition from `healthy` to `unhealthy` while PID 1 remains running.
-- Docker `restart = "unless-stopped"` recovers process/container exit but does not remediate a running-but-unhealthy container.
-- Explicit operator stop is preserved.
-- Docker daemon restart and host reboot restore the container.
-
-The first nginx adapter observes Docker health state externally.
-
-The first RECOVER implementation will likely perform a controlled restart when policy permits it, but recovery must remain separate from both OBSERVE and VERIFY.
-
-The adapter boundary remains:
-
-```text
-generic framework
-    knows: service identity, adapter selection, behavioral exit contracts
-
-nginx adapter
-    knows: Docker container identity, running state, Docker health state,
-           and nginx-specific recovery mechanics
-```
-
-The generic framework must not depend on nginx-specific health or restart behavior.
+The generic framework owns only the behavioral contracts, reason-token semantics, and verification timing policy.
 
 ## Future services
 
-A later HashiCorp Vault adapter may implement the same behavioral interface with different service-specific semantics.
+A later Vault adapter may emit different service-specific internal states but should map them into the generic OBSERVE exit classes and a stable reason vocabulary appropriate to the framework.
 
-A future Vault observer may need to distinguish states such as sealed, standby, active, and unavailable before mapping them into the generic OBSERVE contract.
-
-Likewise, a future Vault RECOVER implementation may refuse automated action for some states or require a completely different corrective operation.
-
-The generic contract should therefore remain intentionally small until a second real adapter demonstrates which additional distinctions are genuinely reusable.
+The reason vocabulary may grow only when a second real adapter demonstrates a genuinely reusable distinction.
