@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+command_name="${1:-}"
+shift || true
+
+case "${command_name}" in
+    info)
+        if [[ "${MOCK_DOCKER_INFO_FAIL:-0}" == "1" ]]; then
+            exit 1
+        fi
+        printf '{}\n'
+        ;;
+    inspect)
+        if [[ "${MOCK_CONTAINER_ABSENT:-0}" == "1" ]]; then
+            exit 1
+        fi
+
+        if [[ "${1:-}" == "--format" ]]; then
+            format="${2:-}"
+            case "${format}" in
+                '{{.State.Status}}')
+                    printf '%s\n' "${MOCK_STATE_STATUS:-running}"
+                    ;;
+                '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}')
+                    printf '%s\n' "${MOCK_HEALTH_STATUS:-healthy}"
+                    ;;
+                *)
+                    exit 1
+                    ;;
+            esac
+        else
+            printf '[{}]\n'
+        fi
+        ;;
+    restart)
+        if [[ "${MOCK_DOCKER_RESTART_FAIL:-0}" == "1" ]]; then
+            exit 1
+        fi
+        printf '%s\n' "${1:-}"
+        ;;
+    *)
+        printf 'unexpected docker command: %s\n' "${command_name}" >&2
+        exit 99
+        ;;
+esac
