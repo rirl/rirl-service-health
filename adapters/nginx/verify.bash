@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 
 readonly PROGRAM_NAME="${0##*/}"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly OBSERVE_COMMAND="${OBSERVE_COMMAND:-${SCRIPT_DIR}/../../scripts/observe.bash}"
 
 readonly DEFAULT_TIMEOUT_SECONDS=120
